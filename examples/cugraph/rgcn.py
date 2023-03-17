@@ -27,14 +27,15 @@ dataset = Entities(path, args.dataset)
 data = dataset[0].to(device, 'edge_index', 'edge_type', 'train_y', 'test_y')
 
 num_bases = 10
+hidden_channels = 64
 
 class RGCN(torch.nn.Module):
     def __init__(self, use_cugraph=True):
         super().__init__()
-        self.emb = nn.Embedding(dataset.num_nodes, 16)
+        self.emb = nn.Embedding(dataset.num_nodes, hidden_channels)
         Conv = CuGraphRGCNConv if use_cugraph else RGCNConv
-        self.conv1 = Conv(16, 16, dataset.num_relations, num_bases=num_bases)
-        self.conv2 = Conv(16, dataset.num_classes, dataset.num_relations, num_bases=num_bases)
+        self.conv1 = Conv(hidden_channels, hidden_channels, dataset.num_relations, num_bases=num_bases)
+        self.conv2 = Conv(hidden_channels, dataset.num_classes, dataset.num_relations, num_bases=num_bases)
 
     def forward(self, n_id, edge_index, edge_type):
         """ edge_index, edge_type needed to be in csc representation when `use_cugraph=True`."""

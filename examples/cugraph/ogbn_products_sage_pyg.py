@@ -9,9 +9,9 @@ from ogb.nodeproppred import Evaluator, PygNodePropPredDataset
 from tqdm import tqdm
 
 from torch_geometric.loader import NeighborSampler
-from torch_geometric.nn import CuGraphSAGEConv as SAGEConv
+from torch_geometric.nn import SAGEConv
 
-root = osp.join(osp.dirname(osp.realpath(__file__)), '../..', 'data', 'products')
+root = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'products')
 dataset = PygNodePropPredDataset('ogbn-products', root)
 split_idx = dataset.get_idx_split()
 evaluator = Evaluator(name='ogbn-products')
@@ -21,12 +21,10 @@ train_idx = split_idx['train']
 train_loader = NeighborSampler(data.edge_index, node_idx=train_idx,
                                sizes=[15, 10, 5], batch_size=1024,
                                shuffle=True, num_workers=12)
-
 subgraph_loader = NeighborSampler(data.edge_index, node_idx=None, sizes=[-1],
                                   batch_size=4096, shuffle=False,
                                   num_workers=12)
 
-t_to_csc = 0
 
 class SAGE(torch.nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers):
@@ -52,11 +50,8 @@ class SAGE(torch.nn.Module):
         # Target nodes are also included in the source nodes so that one can
         # easily apply skip-connections or add self-loops.
         for i, (edge_index, _, size) in enumerate(adjs):
-            global t_to_csc
-            tic = time.time()
-            csc = SAGEConv.to_csc(edge_index, size)
-            t_to_csc += time.time() - tic
-            x = self.convs[i](x, csc)
+            x_target = x[:size[1]]  # Target nodes are always placed first.
+            x = self.convs[i]((x, x_target), edge_index)
             if i != self.num_layers - 1:
                 x = F.relu(x)
                 x = F.dropout(x, p=0.5, training=self.training)
@@ -76,8 +71,8 @@ class SAGE(torch.nn.Module):
                 edge_index, _, size = adj.to(device)
                 total_edges += edge_index.size(1)
                 x = x_all[n_id].to(device)
-                csc = SAGEConv.to_csc(edge_index, (size[0], size[0]))
-                x = self.convs[i](x, csc)[:size[1]]
+                x_target = x[:size[1]]
+                x = self.convs[i]((x, x_target), edge_index)
                 if i != self.num_layers - 1:
                     x = F.relu(x)
                 xs.append(x.cpu())
@@ -177,8 +172,8 @@ for run in range(1, 2):
 
         t_model_total += t_model_per_epoch
 
-print(t_model_total, t_to_csc)
-print(f"Model time per epoch: {(t_model_total-t_to_csc) / n_epochs:.4f}")
+print(t_model_total)
+print(f"Model time per epoch: {(t_model_total) / n_epochs:.4f}")
 
 #         if epoch > 5:
 #             train_acc, val_acc, test_acc = test()

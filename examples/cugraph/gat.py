@@ -11,7 +11,7 @@ from torch_geometric.nn import CuGraphGATConv, GATConv
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, default='Cora')
-parser.add_argument('--hidden_channels', type=int, default=8)
+parser.add_argument('--hidden_channels', type=int, default=64)
 parser.add_argument('--heads', type=int, default=8)
 parser.add_argument('--lr', type=float, default=0.005)
 parser.add_argument('--epochs', type=int, default=100)
