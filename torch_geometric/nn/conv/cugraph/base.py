@@ -41,6 +41,8 @@ class CuGraphModule(torch.nn.Module):  # pragma: no cover
         self,
         edge_index: EdgeIndex,
         max_num_neighbors: Optional[int] = None,
+        is_bipartite: Optional[bool] = None,
+        preserve_edge_order: bool = False,
     ) -> Any:
         r"""Constructs a :obj:`cugraph` graph object from CSC representation.
         Supports both bipartite and non-bipartite graphs.
@@ -51,12 +53,18 @@ class CuGraphModule(torch.nn.Module):  # pragma: no cover
                 of a target node. It is only effective when operating in a
                 bipartite graph. When not given, will be computed on-the-fly,
                 leading to slightly worse performance. (default: :obj:`None`)
+            is_bipartite (bool, optional): Whether to construct a bipartite
+                graph regardless of its dimensions. (default: :obj:`None`)
+            preserve_edge_order (bool, optional): Whether edge data uses the
+                original edge order. (default: :obj:`False`)
         """
         if not isinstance(edge_index, EdgeIndex):
             raise ValueError(f"'edge_index' needs to be of type 'EdgeIndex' "
                              f"(got {type(edge_index)})")
 
-        edge_index = edge_index.sort_by('col')[0]
+        edge_index, perm = edge_index.sort_by('col')
+        map_csc_to_coo = (None if not preserve_edge_order or perm is None else
+                          perm.to(dtype=edge_index.dtype))
         num_src_nodes = edge_index.get_sparse_size(0)
         (colptr, row), _ = edge_index.get_csc()
 
@@ -64,22 +72,33 @@ class CuGraphModule(torch.nn.Module):  # pragma: no cover
             raise RuntimeError(f"'{self.__class__.__name__}' requires GPU-"
                                f"based processing (got CPU tensor)")
 
-        if num_src_nodes != colptr.numel() - 1:  # Bipartite graph:
+        explicit_is_bipartite = is_bipartite
+        if is_bipartite is None:
+            is_bipartite = num_src_nodes != colptr.numel() - 1
+
+        if is_bipartite:  # Bipartite graph:
             if max_num_neighbors is None:
-                max_num_neighbors = int((colptr[1:] - colptr[:-1]).max())
+                degrees = colptr[1:] - colptr[:-1]
+                max_num_neighbors = (int(degrees.max())
+                                     if degrees.numel() > 0 else 0)
 
             if LEGACY_MODE:
                 dst_nodes = torch.arange(colptr.numel() - 1, device=row.device)
                 return make_mfg_csr(dst_nodes, colptr, row, max_num_neighbors,
                                     num_src_nodes)
 
-            return CSC(colptr, row, num_src_nodes,
+            if explicit_is_bipartite:
+                return CSC(colptr, row, num_src_nodes, map_csc_to_coo,
+                           dst_max_in_degree=max_num_neighbors,
+                           is_bipartite=True)
+            return CSC(colptr, row, num_src_nodes, map_csc_to_coo,
                        dst_max_in_degree=max_num_neighbors)
 
         if LEGACY_MODE:
             return make_fg_csr(colptr, row)
 
-        return CSC(colptr, row, num_src_nodes=num_src_nodes)
+        return CSC(colptr, row, num_src_nodes=num_src_nodes,
+                   map_csc_to_coo=map_csc_to_coo)
 
     def get_typed_cugraph(
         self,
