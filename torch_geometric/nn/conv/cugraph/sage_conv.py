@@ -1,34 +1,29 @@
 from typing import Optional
 
+import torch
 import torch.nn.functional as F
 from torch import Tensor
 from torch.nn import Linear
 
 from torch_geometric import EdgeIndex
-from torch_geometric.nn.conv.cugraph import CuGraphModule
-from torch_geometric.nn.conv.cugraph.base import LEGACY_MODE
 
 try:
-    if LEGACY_MODE:
-        from pylibcugraphops.torch.autograd import \
-            agg_concat_n2n as SAGEConvAgg
-    else:
-        from pylibcugraphops.pytorch.operators import \
-            agg_concat_n2n as SAGEConvAgg
+    from cudnn.gnn import CscGraph, agg_simple
+    HAS_CUDNN_GNN = True
 except ImportError:
-    pass
+    HAS_CUDNN_GNN = False
 
 
-class CuGraphSAGEConv(CuGraphModule):  # pragma: no cover
+class CuGraphSAGEConv(torch.nn.Module):  # pragma: no cover
     r"""The GraphSAGE operator from the `"Inductive Representation Learning on
     Large Graphs" <https://arxiv.org/abs/1706.02216>`_ paper.
 
     :class:`CuGraphSAGEConv` is an optimized version of
-    :class:`~torch_geometric.nn.conv.SAGEConv` based on the :obj:`cugraph-ops`
-    package that fuses message passing computation for accelerated execution
-    and lower memory footprint.
+    :class:`~torch_geometric.nn.conv.SAGEConv` based on the cuDNN GNN API that
+    fuses message passing computation for accelerated execution and lower
+    memory footprint.
 
-    See :ref:`install-cugraph` for how to set up :obj:`cugraph-ops`.
+    Install :obj:`nvidia-cudnn-frontend[cutedsl]` to use this operator.
     """
     def __init__(
         self,
@@ -41,6 +36,10 @@ class CuGraphSAGEConv(CuGraphModule):  # pragma: no cover
         bias: bool = True,
     ):
         super().__init__()
+
+        if not HAS_CUDNN_GNN:
+            raise ModuleNotFoundError(f"'{self.__class__.__name__}' requires "
+                                      f"'nvidia-cudnn-frontend[cutedsl]'")
 
         if aggr not in ['mean', 'sum', 'min', 'max']:
             raise ValueError(f"Aggregation function must be either 'mean', "
@@ -74,17 +73,33 @@ class CuGraphSAGEConv(CuGraphModule):  # pragma: no cover
         edge_index: EdgeIndex,
         max_num_neighbors: Optional[int] = None,
     ) -> Tensor:
-        graph = self.get_cugraph(edge_index, max_num_neighbors)
+        if not isinstance(edge_index, EdgeIndex):
+            raise ValueError(f"'edge_index' needs to be of type 'EdgeIndex' "
+                             f"(got {type(edge_index)})")
+
+        edge_index = edge_index.sort_by('col')[0]
+        num_src_nodes = edge_index.get_sparse_size(0)
+        (colptr, row), _ = edge_index.get_csc()
+
+        if not row.is_cuda:
+            raise RuntimeError(f"'{self.__class__.__name__}' requires GPU-"
+                               f"based processing (got CPU tensor)")
+
+        graph = CscGraph(colptr, row, num_src_nodes)
+
+        root = x[:graph.num_dst_nodes]
 
         if self.project:
             x = self.pre_lin(x).relu()
 
-        out = SAGEConvAgg(x, graph, self.aggr)
+        out = agg_simple(
+            graph,
+            node_features=x,
+            concat_features=root if self.root_weight else None,
+            aggr=self.aggr,
+        )
 
-        if self.root_weight:
-            out = self.lin(out)
-        else:
-            out = self.lin(out[:, :self.in_channels])
+        out = self.lin(out)
 
         if self.normalize:
             out = F.normalize(out, p=2., dim=-1)
