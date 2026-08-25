@@ -6,6 +6,24 @@ from torch_geometric.nn import CuGraphSAGEConv, SAGEConv
 from torch_geometric.testing import onlyCUDA, withPackage
 
 
+def copy_sage_weights(
+    source: SAGEConv,
+    target: CuGraphSAGEConv,
+    src_channels: int,
+    dst_channels: int,
+):
+    with torch.no_grad():
+        if source.project:
+            target.pre_lin.weight.copy_(source.lin.weight)
+            target.pre_lin.bias.copy_(source.lin.bias)
+        target.lin.weight[:, :src_channels].copy_(source.lin_l.weight)
+        if source.root_weight:
+            target.lin.weight[:, src_channels:src_channels +
+                              dst_channels].copy_(source.lin_r.weight)
+        if source.lin_l.bias is not None:
+            target.lin.bias.copy_(source.lin_l.bias)
+
+
 @onlyCUDA
 @withPackage('cudnn')
 @pytest.mark.parametrize('aggr', ['sum', 'mean', 'min', 'max'])
@@ -16,15 +34,17 @@ from torch_geometric.testing import onlyCUDA, withPackage
 @pytest.mark.parametrize('root_weight', [True, False])
 def test_sage_conv_equality(aggr, bias, bipartite, normalize, project,
                             root_weight):
-    in_channels = (8, 4) if bipartite else 8
+    src_channels = 8
+    dst_channels = 4 if bipartite else 8
+    in_channels = (src_channels, dst_channels) if bipartite else src_channels
     out_channels = 16
     kwargs = dict(aggr=aggr, bias=bias, normalize=normalize, project=project,
                   root_weight=root_weight)
 
-    x_src1 = torch.rand(10, 8, device='cuda', requires_grad=True)
+    x_src1 = torch.rand(10, src_channels, device='cuda', requires_grad=True)
     x_src2 = x_src1.detach().clone().requires_grad_(True)
     if bipartite:
-        x_dst1 = torch.rand(8, 4, device='cuda', requires_grad=True)
+        x_dst1 = torch.rand(8, dst_channels, device='cuda', requires_grad=True)
         x_dst2 = x_dst1.detach().clone().requires_grad_(True)
         x1 = (x_src1, x_dst1)
         x2 = (x_src2, x_dst2)
@@ -41,7 +61,11 @@ def test_sage_conv_equality(aggr, bias, bipartite, normalize, project,
 
     conv1 = SAGEConv(in_channels, out_channels, **kwargs).cuda()
     conv2 = CuGraphSAGEConv(in_channels, out_channels, **kwargs).cuda()
-    conv2.load_state_dict(conv1.state_dict())
+    copy_sage_weights(conv1, conv2, src_channels, dst_channels)
+
+    expected_in_channels = (src_channels +
+                            dst_channels if root_weight else src_channels)
+    assert conv2.lin.weight.size(1) == expected_in_channels
 
     out1 = conv1(x1, edge_index, size=size)
     out2 = conv2(x2, edge_index, size=size)
@@ -59,24 +83,36 @@ def test_sage_conv_equality(aggr, bias, bipartite, normalize, project,
             assert x_dst1.grad is None
             assert x_dst2.grad is None
 
-    params1 = dict(conv1.named_parameters())
-    params2 = dict(conv2.named_parameters())
-    assert params1.keys() == params2.keys()
-    for name in params1.keys():
-        assert torch.allclose(params1[name].grad, params2[name].grad,
+    if project:
+        assert torch.allclose(conv1.lin.weight.grad, conv2.pre_lin.weight.grad,
+                              atol=1e-6)
+        assert torch.allclose(conv1.lin.bias.grad, conv2.pre_lin.bias.grad,
+                              atol=1e-6)
+
+    assert torch.allclose(conv1.lin_l.weight.grad,
+                          conv2.lin.weight.grad[:, :src_channels], atol=1e-6)
+    if root_weight:
+        assert torch.allclose(
+            conv1.lin_r.weight.grad,
+            conv2.lin.weight.grad[:, src_channels:src_channels + dst_channels],
+            atol=1e-6,
+        )
+    if bias:
+        assert torch.allclose(conv1.lin_l.bias.grad, conv2.lin.bias.grad,
                               atol=1e-6)
 
 
 @onlyCUDA
 @withPackage('cudnn')
 def test_sage_conv_without_target_features():
-    x1 = torch.rand(4, 8, device='cuda', requires_grad=True)
+    src_channels, dst_channels = 8, 16
+    x1 = torch.rand(4, src_channels, device='cuda', requires_grad=True)
     x2 = x1.detach().clone().requires_grad_(True)
     edge_index = torch.tensor([[0, 1, 2, 3], [0, 0, 1, 1]], device='cuda')
 
-    conv1 = SAGEConv((8, 16), 32).cuda()
-    conv2 = CuGraphSAGEConv((8, 16), 32).cuda()
-    conv2.load_state_dict(conv1.state_dict())
+    conv1 = SAGEConv((src_channels, dst_channels), 32).cuda()
+    conv2 = CuGraphSAGEConv((src_channels, dst_channels), 32).cuda()
+    copy_sage_weights(conv1, conv2, src_channels, dst_channels)
 
     out1 = conv1((x1, None), edge_index, size=(4, 2))
     out2 = conv2((x2, None), edge_index, size=(4, 2))
@@ -86,6 +122,12 @@ def test_sage_conv_without_target_features():
     out1.backward(grad_out)
     out2.backward(grad_out)
     assert torch.allclose(x1.grad, x2.grad, atol=1e-6)
+    assert torch.allclose(conv1.lin_l.weight.grad,
+                          conv2.lin.weight.grad[:, :src_channels], atol=1e-6)
+    assert torch.count_nonzero(
+        conv2.lin.weight.grad[:, src_channels:]).item() == 0
+    assert torch.allclose(conv1.lin_l.bias.grad, conv2.lin.bias.grad,
+                          atol=1e-6)
 
 
 @onlyCUDA
@@ -97,9 +139,14 @@ def test_lazy_sage_conv():
     conv = CuGraphSAGEConv(-1, 32).cuda()
     out = conv(x, edge_index)
     assert out.size() == (4, 32)
+    assert conv.lin.weight.size() == (32, 16)
 
     with pytest.raises(ValueError, match="does not support lazy"):
         CuGraphSAGEConv(-1, 32, project=True)
+
+    conv = CuGraphSAGEConv((-1, -1), 32).cuda()
+    with pytest.raises(ValueError, match="without target features"):
+        conv((x, None), edge_index, size=(4, 2))
 
 
 @onlyCUDA

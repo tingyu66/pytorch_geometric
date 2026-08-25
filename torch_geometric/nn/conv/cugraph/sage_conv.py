@@ -3,16 +3,16 @@ from typing import Tuple, Union
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+from torch.nn.parameter import UninitializedParameter
 
 from torch_geometric import EdgeIndex
 from torch_geometric.nn.dense.linear import Linear
 from torch_geometric.typing import OptPairTensor, Size
 
 try:
-    import cudnn
     from cudnn.gnn import CscGraph, agg_simple
-    HAS_CUDNN_GNN = cudnn.is_gnn_agg_simple_available()
-except (AttributeError, ImportError):
+    HAS_CUDNN_GNN = True
+except ImportError:
     HAS_CUDNN_GNN = False
 
 
@@ -22,7 +22,8 @@ class CuGraphSAGEConv(torch.nn.Module):  # pragma: no cover
 
     :class:`CuGraphSAGEConv` is a CUDA-optimized version of
     :class:`~torch_geometric.nn.conv.SAGEConv` that uses the cuDNN GNN API for
-    neighborhood aggregation.
+    neighborhood aggregation and concatenates root features before applying a
+    single linear transformation.
 
     Args:
         in_channels (int or tuple): Size of each input sample, or :obj:`-1` to
@@ -81,20 +82,22 @@ class CuGraphSAGEConv(torch.nn.Module):  # pragma: no cover
                 raise ValueError(f"'{self.__class__.__name__}' does not "
                                  f"support lazy initialization with "
                                  f"`project=True`")
-            self.lin = Linear(in_channels[0], in_channels[0], bias=True)
+            self.pre_lin = Linear(in_channels[0], in_channels[0], bias=True)
 
-        self.lin_l = Linear(in_channels[0], out_channels, bias=bias)
         if self.root_weight:
-            self.lin_r = Linear(in_channels[1], out_channels, bias=False)
+            fused_in_channels = (in_channels[0] +
+                                 in_channels[1] if in_channels[0] > 0
+                                 and in_channels[1] > 0 else -1)
+        else:
+            fused_in_channels = in_channels[0]
+        self.lin = Linear(fused_in_channels, out_channels, bias=bias)
 
         self.reset_parameters()
 
     def reset_parameters(self):
         if self.project:
-            self.lin.reset_parameters()
-        self.lin_l.reset_parameters()
-        if self.root_weight:
-            self.lin_r.reset_parameters()
+            self.pre_lin.reset_parameters()
+        self.lin.reset_parameters()
 
     def forward(
         self,
@@ -134,13 +137,30 @@ class CuGraphSAGEConv(torch.nn.Module):  # pragma: no cover
         graph = CscGraph(colptr, row, num_src_nodes)
 
         if self.project:
-            x_src = self.lin(x_src).relu()
-
-        out = agg_simple(graph, node_features=x_src, aggr=self.aggr)
-        out = self.lin_l(out)
+            x_src = self.pre_lin(x_src).relu()
 
         if self.root_weight and x_dst is not None:
-            out = out + self.lin_r(x_dst)
+            out = agg_simple(
+                graph,
+                node_features=x_src,
+                concat_features=x_dst,
+                aggr=self.aggr,
+            )
+            out = self.lin(out)
+        else:
+            out = agg_simple(graph, node_features=x_src, aggr=self.aggr)
+            if self.root_weight:
+                if isinstance(self.lin.weight, UninitializedParameter):
+                    raise ValueError(
+                        f"'{self.__class__.__name__}' cannot initialize lazy "
+                        f"root weights without target features")
+                out = F.linear(
+                    out,
+                    self.lin.weight[:, :x_src.size(-1)],
+                    self.lin.bias,
+                )
+            else:
+                out = self.lin(out)
 
         if self.normalize:
             out = F.normalize(out, p=2., dim=-1)
