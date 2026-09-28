@@ -12,6 +12,7 @@ from .gat_conv import GATConv
 from .cugraph.gat_conv import CuGraphGATConv
 from .fused_gat_conv import FusedGATConv
 from .gatv2_conv import GATv2Conv
+from .cugraph.gatv2_conv import CuGraphGATv2Conv
 from .transformer_conv import TransformerConv
 from .agnn_conv import AGNNConv
 from .tag_conv import TAGConv
@@ -80,6 +81,7 @@ __all__ = [
     'CuGraphGATConv',
     'FusedGATConv',
     'GATv2Conv',
+    'CuGraphGATv2Conv',
     'TransformerConv',
     'AGNNConv',
     'TAGConv',
