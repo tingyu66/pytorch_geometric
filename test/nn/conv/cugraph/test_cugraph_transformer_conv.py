@@ -1,10 +1,12 @@
 import pytest
 import torch
 
+from torch_geometric import EdgeIndex
 from torch_geometric.nn import CuGraphTransformerConv, TransformerConv
 from torch_geometric.testing import onlyCUDA, withPackage
 
 DTYPES = [torch.float32, torch.float16, torch.bfloat16]
+INDEX_DTYPES = [torch.int32, torch.int64]
 
 
 def assert_close(
@@ -31,6 +33,7 @@ def assert_close(
 
 @onlyCUDA
 @withPackage('cudnn')
+@pytest.mark.parametrize('index_dtype', INDEX_DTYPES)
 @pytest.mark.parametrize('dtype', DTYPES)
 @pytest.mark.parametrize(
     'bias,concat,beta,edge_dim,root_weight',
@@ -41,8 +44,8 @@ def assert_close(
         (False, False, True, 3, False),
     ],
 )
-def test_transformer_conv_equality(dtype, bias, concat, beta, edge_dim,
-                                   root_weight):
+def test_transformer_conv_equality(index_dtype, dtype, bias, concat, beta,
+                                   edge_dim, root_weight):
     torch.manual_seed(12345)
     in_channels, out_channels, heads = 8, 4, 2
     x1 = torch.randn(
@@ -51,7 +54,10 @@ def test_transformer_conv_equality(dtype, bias, concat, beta, edge_dim,
     edge_index = torch.tensor([
         [4, 0, 2, 1, 5, 3, 0, 2],
         [1, 2, 0, 1, 2, 0, 0, 2],
-    ], device='cuda')
+    ], device='cuda', dtype=index_dtype)
+    csc = EdgeIndex(edge_index, sparse_size=(6, 6)).sort_by('col')[0]
+    (colptr, row), _ = csc.get_csc()
+    assert colptr.dtype == row.dtype == index_dtype
     edge_attr1 = None
     edge_attr2 = None
     if edge_dim is not None:
@@ -114,8 +120,9 @@ def test_transformer_conv_equality(dtype, bias, concat, beta, edge_dim,
 
 @onlyCUDA
 @withPackage('cudnn')
+@pytest.mark.parametrize('index_dtype', INDEX_DTYPES)
 @pytest.mark.parametrize('dtype', DTYPES)
-def test_transformer_conv_bipartite_equality(dtype):
+def test_transformer_conv_bipartite_equality(index_dtype, dtype):
     torch.manual_seed(13579)
     in_channels = (8, 5)
     out_channels, heads, edge_dim = 4, 2, 3
@@ -128,7 +135,10 @@ def test_transformer_conv_bipartite_equality(dtype):
     edge_index = torch.tensor([
         [0, 1, 3, 2, 0, 3, 1, 2],
         [0, 1, 2, 3, 4, 5, 5, 4],
-    ], device='cuda')
+    ], device='cuda', dtype=index_dtype)
+    csc = EdgeIndex(edge_index, sparse_size=(4, 6)).sort_by('col')[0]
+    (colptr, row), _ = csc.get_csc()
+    assert colptr.dtype == row.dtype == index_dtype
     edge_attr1 = torch.randn(
         edge_index.size(1), edge_dim, device='cuda', dtype=dtype,
         requires_grad=True)
@@ -226,12 +236,13 @@ def test_transformer_conv_lazy():
 
 @onlyCUDA
 @withPackage('cudnn')
-def test_transformer_conv_deterministic_backward():
+@pytest.mark.parametrize('index_dtype', INDEX_DTYPES)
+def test_transformer_conv_deterministic_backward(index_dtype):
     x = torch.randn(4, 8, device='cuda', requires_grad=True)
     edge_index = torch.tensor([
         [0, 1, 2, 3],
         [0, 0, 1, 1],
-    ], device='cuda')
+    ], device='cuda', dtype=index_dtype)
     conv = CuGraphTransformerConv(8, 4, heads=2).cuda()
 
     previous = torch.are_deterministic_algorithms_enabled()

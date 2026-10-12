@@ -6,6 +6,7 @@ from torch_geometric.nn import CuGraphSAGEConv, SAGEConv
 from torch_geometric.testing import onlyCUDA, withPackage
 
 DTYPES = [torch.float32, torch.float16, torch.bfloat16]
+INDEX_DTYPES = [torch.int32, torch.int64]
 
 
 def assert_close(actual: torch.Tensor, expected: torch.Tensor):
@@ -120,13 +121,18 @@ def test_sage_conv_equality(aggr, bias, bipartite, normalize, project,
 
 @onlyCUDA
 @withPackage('cudnn')
+@pytest.mark.parametrize('index_dtype', INDEX_DTYPES)
 @pytest.mark.parametrize('dtype', DTYPES)
-def test_sage_conv_without_target_features(dtype):
+def test_sage_conv_without_target_features(index_dtype, dtype):
     src_channels, dst_channels = 8, 16
     x1 = torch.rand(4, src_channels, device='cuda', dtype=dtype,
                     requires_grad=True)
     x2 = x1.detach().clone().requires_grad_(True)
-    edge_index = torch.tensor([[0, 1, 2, 3], [0, 0, 1, 1]], device='cuda')
+    edge_index = torch.tensor(
+        [[0, 1, 2, 3], [0, 0, 1, 1]],
+        device='cuda',
+        dtype=index_dtype,
+    )
 
     conv1 = SAGEConv((src_channels, dst_channels),
                      32).to(device='cuda', dtype=dtype)
@@ -170,9 +176,14 @@ def test_lazy_sage_conv():
 
 @onlyCUDA
 @withPackage('cudnn')
-def test_sage_conv_edge_index():
+@pytest.mark.parametrize('index_dtype', INDEX_DTYPES)
+def test_sage_conv_edge_index(index_dtype):
     x = torch.rand(4, 8, device='cuda')
-    edge_index = torch.tensor([[0, 1, 2, 3], [0, 0, 1, 1]], device='cuda')
+    edge_index = torch.tensor(
+        [[0, 1, 2, 3], [0, 0, 1, 1]],
+        device='cuda',
+        dtype=index_dtype,
+    )
     csc = EdgeIndex(edge_index, sparse_size=(4, 2), sort_order='col')
     conv = CuGraphSAGEConv((8, 8), 32).cuda()
 

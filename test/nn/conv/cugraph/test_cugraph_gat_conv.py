@@ -6,6 +6,7 @@ from torch_geometric.nn import CuGraphGATConv, GATConv
 from torch_geometric.testing import onlyCUDA, withPackage
 
 DTYPES = [torch.float32, torch.float16, torch.bfloat16]
+INDEX_DTYPES = [torch.int32, torch.int64]
 
 
 def assert_close(
@@ -132,8 +133,9 @@ def test_gat_conv_equality(dtype, bias, concat, edge_dim, residual,
 
 @onlyCUDA
 @withPackage('cudnn')
+@pytest.mark.parametrize('index_dtype', INDEX_DTYPES)
 @pytest.mark.parametrize('dtype', DTYPES)
-def test_gat_conv_bipartite_equality(dtype):
+def test_gat_conv_bipartite_equality(index_dtype, dtype):
     torch.manual_seed(13579)
     in_channels = (8, 5)
     out_channels, heads, edge_dim = 4, 2, 3
@@ -146,7 +148,7 @@ def test_gat_conv_bipartite_equality(dtype):
     edge_index = torch.tensor([
         [0, 1, 3, 2, 0, 3, 1, 2],
         [0, 1, 2, 3, 4, 5, 5, 4],
-    ], device='cuda')
+    ], device='cuda', dtype=index_dtype)
     edge_attr1 = torch.randn(
         edge_index.size(1), edge_dim, device='cuda', dtype=dtype,
         requires_grad=True)

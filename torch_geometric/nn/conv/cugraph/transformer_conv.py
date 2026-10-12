@@ -123,6 +123,8 @@ class CuGraphTransformerConv(torch.nn.Module):  # pragma: no cover
         edge_index = EdgeIndex(edge_index, sparse_size=size)
         edge_index, perm = edge_index.sort_by('col', stable=True)
         (colptr, row), _ = edge_index.get_csc()
+        if perm is not None and perm.dtype != colptr.dtype:
+            perm = perm.to(dtype=colptr.dtype)
 
         graph = CscGraph(
             colptr,
